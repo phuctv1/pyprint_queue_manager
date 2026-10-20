@@ -140,16 +140,35 @@ class PrintEngine:
                 except Exception:
                     pass
 
-            # Cập nhật trạng thái item thành Đang in
-            self.queue_mgr.update_item_status(item.id, PrintStatus.PRINTING, "Đang gửi đến máy in...")
-            self.log(f"[{current_idx}/{total_files}] Đang in file: {item.filename} (Bản in: {item.copies})...", "info")
+            # Tổng hợp thông tin cấu hình để hiển thị log rõ ràng
+            settings_info = []
+            if item.print_settings:
+                if item.print_settings.get("paper_size"):
+                    settings_info.append(f"Khổ: {item.print_settings['paper_size']}")
+                if item.print_settings.get("orientation"):
+                    settings_info.append("Ngang" if "landscape" in str(item.print_settings['orientation']).lower() else "Dọc")
+                if item.print_settings.get("duplex"):
+                    dup_val = str(item.print_settings['duplex']).lower()
+                    if "one sided" in dup_val or "simplex" in dup_val:
+                        settings_info.append("1 mặt")
+                    else:
+                        settings_info.append("2 mặt")
+                if item.print_settings.get("pages_range"):
+                    settings_info.append(f"Trang: {item.print_settings['pages_range']}")
+                elif item.print_settings.get("page_from") or item.print_settings.get("page_to"):
+                    settings_info.append(f"Trang: {item.print_settings.get('page_from', 1)}-{item.print_settings.get('page_to', '')}")
 
-            # Thực hiện lệnh in thực tế
+            cfg_str = f" [{', '.join(settings_info)}]" if settings_info else ""
+            self.queue_mgr.update_item_status(item.id, PrintStatus.PRINTING, "Đang gửi đến máy in...")
+            self.log(f"[{current_idx}/{total_files}] Đang in file: {item.filename} ({item.copies} bản){cfg_str}...", "info")
+
+            # Thực hiện lệnh in thực tế với Print Settings (DEVMODE, Silent PDF, Word/Excel COM)
             start_time = time.time()
             success, msg = PrinterService.print_file(
                 filepath=item.filepath,
                 printer_name=self.printer_name,
-                copies=item.copies
+                copies=item.copies,
+                settings=item.print_settings
             )
             elapsed = time.time() - start_time
 

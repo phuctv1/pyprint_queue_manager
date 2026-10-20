@@ -51,6 +51,7 @@ class ModernPrintApp(ctk.CTk):
 
         # Biến trạng thái kéo thả bảng
         self._tree_drag_item = None
+        self._print_settings_dialog: Optional[OfficePrintSettingsDialog] = None
 
         # Khởi tạo giao diện người dùng
         self._setup_styles()
@@ -404,8 +405,8 @@ class ModernPrintApp(ctk.CTk):
         self.table_container.grid_columnconfigure(0, weight=1)
         self.table_container.grid_rowconfigure(0, weight=1)
 
-        # Thay cột dung lượng bằng cột "preview" (Xem trước) theo yêu cầu #2
-        columns = ("stt", "name", "type", "preview", "copies", "status", "detail", "path")
+        # Cột bảng: STT, Tên, Loại, Số Trang, Xem trước, Bản in, Trạng thái, Chi tiết, Đường dẫn
+        columns = ("stt", "name", "type", "pages", "preview", "copies", "status", "detail", "path")
         self.tree = ttk.Treeview(
             self.table_container,
             columns=columns,
@@ -418,20 +419,22 @@ class ModernPrintApp(ctk.CTk):
         self.tree.heading("stt", text="STT")
         self.tree.heading("name", text="Tên File")
         self.tree.heading("type", text="Loại")
+        self.tree.heading("pages", text="Số Trang")
         self.tree.heading("preview", text="Xem trước")
         self.tree.heading("copies", text="Bản In")
         self.tree.heading("status", text="Trạng Thái")
         self.tree.heading("detail", text="Chi Tiết Xử Lý")
         self.tree.heading("path", text="Đường Dẫn")
 
-        self.tree.column("stt", width=45, anchor="center")
-        self.tree.column("name", width=230, anchor="w")
-        self.tree.column("type", width=65, anchor="center")
+        self.tree.column("stt", width=42, anchor="center")
+        self.tree.column("name", width=220, anchor="w")
+        self.tree.column("type", width=60, anchor="center")
+        self.tree.column("pages", width=75, anchor="center")
         self.tree.column("preview", width=95, anchor="center")
         self.tree.column("copies", width=70, anchor="center")
         self.tree.column("status", width=120, anchor="w")
-        self.tree.column("detail", width=170, anchor="w")
-        self.tree.column("path", width=300, anchor="w")
+        self.tree.column("detail", width=160, anchor="w")
+        self.tree.column("path", width=270, anchor="w")
 
         # Scrollbars
         vsb = ttk.Scrollbar(self.table_container, orient="vertical", command=self.tree.yview)
@@ -491,13 +494,21 @@ class ModernPrintApp(ctk.CTk):
         )
         self.lbl_progress_status.grid(row=0, column=0, sticky="w")
 
+        self.lbl_paper_estimator = ctk.CTkLabel(
+            prog_frame,
+            text="📄 Ước tính: 0 trang | Cần khoảng 0 tờ giấy A4",
+            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            text_color=("#0284c7", "#38bdf8"),
+        )
+        self.lbl_paper_estimator.grid(row=0, column=1, padx=(20, 16), sticky="w")
+
         self.lbl_progress_percent = ctk.CTkLabel(
             prog_frame,
             text="0%",
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             text_color=("#2563eb", "#38bdf8"),
         )
-        self.lbl_progress_percent.grid(row=0, column=1, sticky="e")
+        self.lbl_progress_percent.grid(row=0, column=2, sticky="e")
 
         # Thanh tiến độ
         self.progress_bar = ctk.CTkProgressBar(ctrl_card, height=14, corner_radius=7)
@@ -933,6 +944,7 @@ class ModernPrintApp(ctk.CTk):
                 idx,
                 it.filename,
                 it.file_type.upper(),
+                f"{it.page_count} trang",
                 "👁️ Xem & Sửa",
                 f"{it.copies} bản",
                 it.get_status_badge(),
@@ -959,11 +971,15 @@ class ModernPrintApp(ctk.CTk):
         if self.engine.state == EngineState.IDLE:
             self.btn_print_settings.configure(state="normal" if bool(items) else "disabled")
 
-        # Cập nhật thống kê trên thanh tiêu đề
+        # Cập nhật thống kê trên thanh tiêu đề và nhãn ước lượng giấy
         stats = self.queue_mgr.get_stats()
         self.lbl_queue_title.configure(
-            text=f"📋 HÀNG ĐỢI IN ({stats['total']} file - {stats['total_size_str']}) | ⏳ {stats['pending']} | 🖨️ {stats['printing']} | ✅ {stats['completed']} | ❌ {stats['failed']}"
+            text=f"📋 HÀNG ĐỢI IN ({stats['total']} file | {stats['total_pages']} trang - {stats['total_size_str']}) | ⏳ {stats['pending']} | 🖨️ {stats['printing']} | ✅ {stats['completed']} | ❌ {stats['failed']}"
         )
+        if hasattr(self, "lbl_paper_estimator"):
+            self.lbl_paper_estimator.configure(
+                text=f"📄 Ước tính giấy: {stats['total_pages']} trang ({stats['total_printed_pages']} lượt in) ➔ Cần khoảng {stats['estimated_paper_sheets']} tờ giấy A4"
+            )
 
         # Khôi phục vị trí chọn nếu còn hợp lệ
         all_children = self.tree.get_children()
@@ -1005,10 +1021,17 @@ class ModernPrintApp(ctk.CTk):
         else:
             # Click trên cùng 1 dòng: Kiểm tra xem người dùng click cột nào
             if target:
-                if col == "#4":  # Cột "Xem trước" -> Mở vùng xem trước & chỉnh sửa trực tiếp
-                    self._open_preview_for_row(target)
-                elif col == "#5":  # Cột "Bản in" -> Mở công cụ điều chỉnh số lượng bản in
-                    self._show_copies_editor(target, event.x_root, event.y_root)
+                try:
+                    col_idx = int(col.replace("#", "")) - 1
+                    cols = self.tree["columns"]
+                    if 0 <= col_idx < len(cols):
+                        c_name = cols[col_idx]
+                        if c_name in ("preview", "pages"):
+                            self._open_preview_for_row(target)
+                        elif c_name == "copies":
+                            self._show_copies_editor(target, event.x_root, event.y_root)
+                except Exception:
+                    pass
 
         self._tree_drag_item = None
 
@@ -1020,12 +1043,20 @@ class ModernPrintApp(ctk.CTk):
         if event:
             col = self.tree.identify_column(event.x)
             row = self.tree.identify_row(event.y)
-            if col == "#4" and row:
-                self._open_preview_for_row(row)
-                return
-            elif col == "#5" and row:
-                self._show_copies_editor(row, event.x_root, event.y_root)
-                return
+            if row:
+                try:
+                    col_idx = int(col.replace("#", "")) - 1
+                    cols = self.tree["columns"]
+                    if 0 <= col_idx < len(cols):
+                        c_name = cols[col_idx]
+                        if c_name in ("preview", "pages"):
+                            self._open_preview_for_row(row)
+                            return
+                        elif c_name == "copies":
+                            self._show_copies_editor(row, event.x_root, event.y_root)
+                            return
+                except Exception:
+                    pass
 
         indices = self._get_selected_tree_indices()
         if not indices:
@@ -1172,7 +1203,18 @@ class ModernPrintApp(ctk.CTk):
     # ================== PRINT SETTINGS (WORD & EXCEL STYLED) ==================
 
     def _on_print_settings_click(self):
-        """Mở cửa sổ Print Settings theo định dạng tài liệu được chọn."""
+        """Mở cửa sổ Print Settings theo định dạng tài liệu được chọn (ngăn chặn mở trùng lặp)."""
+        # Nếu cửa sổ print settings đã đang mở thì đưa lên trên và lấy focus
+        if hasattr(self, "_print_settings_dialog") and self._print_settings_dialog is not None:
+            try:
+                if self._print_settings_dialog.winfo_exists():
+                    self._print_settings_dialog.deiconify()
+                    self._print_settings_dialog.lift()
+                    self._print_settings_dialog.focus_force()
+                    return
+            except Exception:
+                self._print_settings_dialog = None
+
         items = self.queue_mgr.get_items()
         if not items:
             messagebox.showinfo("Thông báo", "Vui lòng thêm ít nhất một file vào hàng đợi trước khi mở Print Settings!")
@@ -1181,7 +1223,7 @@ class ModernPrintApp(ctk.CTk):
         indices = self._get_selected_tree_indices()
         target_item = items[indices[0]] if indices and indices[0] < len(items) else items[0]
 
-        dialog = OfficePrintSettingsDialog(
+        self._print_settings_dialog = OfficePrintSettingsDialog(
             parent=self,
             item=target_item,
             all_items=items,
@@ -1190,22 +1232,29 @@ class ModernPrintApp(ctk.CTk):
         self._add_log(f"Đã mở cửa sổ Print Settings cho file: {target_item.filename}", "info")
 
     def _on_print_settings_applied(self, item: PrintItem, settings: dict, apply_all: bool):
+        # Cập nhật trực tiếp vào đối tượng target_item
+        if hasattr(item, "print_settings"):
+            item.print_settings.update(settings)
+
         items = self.queue_mgr.get_items()
         if apply_all:
+            target_ext = os.path.splitext(item.filepath)[1].lower()
             for idx, it in enumerate(items):
                 ext = os.path.splitext(it.filepath)[1].lower()
-                target_ext = os.path.splitext(item.filepath)[1].lower()
                 if (ext in [".doc", ".docx"] and target_ext in [".doc", ".docx"]) or \
                    (ext in [".xls", ".xlsx"] and target_ext in [".xls", ".xlsx"]):
+                    it.print_settings.update(settings)
                     self.queue_mgr.update_item_settings(idx, settings)
             self._add_log("Đã áp dụng Print Settings cho tất cả file cùng định dạng.", "success")
         else:
-            try:
-                idx = items.index(item)
-                self.queue_mgr.update_item_settings(idx, settings)
-                self._add_log(f"Đã lưu Print Settings cho file: {item.filename}", "success")
-            except ValueError:
-                pass
+            target_idx = None
+            for idx, it in enumerate(items):
+                if it.id == item.id:
+                    target_idx = idx
+                    break
+            if target_idx is not None:
+                self.queue_mgr.update_item_settings(target_idx, settings)
+            self._add_log(f"Đã lưu Print Settings cho file: {item.filename}", "success")
 
     def _open_file_directory(self):
         """Mở thư mục chứa file trong Windows Explorer."""

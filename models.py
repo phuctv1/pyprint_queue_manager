@@ -20,6 +20,75 @@ class Priority(Enum):
     URGENT = 2
 
 
+def detect_file_page_count(filepath: str) -> int:
+    """Xác định nhanh số trang của tài liệu trước khi in."""
+    if not filepath or not os.path.exists(filepath):
+        return 1
+
+    ext = os.path.splitext(filepath)[1].lower()
+
+    # 1. Ảnh: luôn là 1 trang
+    if ext in [".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"]:
+        return 1
+
+    # 2. PDF: Đếm chính xác qua pypdfium2 hoặc đọc header PDF
+    if ext == ".pdf":
+        try:
+            import pypdfium2
+            doc = pypdfium2.PdfDocument(filepath)
+            count = len(doc)
+            doc.close()
+            return max(1, count)
+        except Exception:
+            try:
+                with open(filepath, "rb") as f:
+                    content = f.read()
+                    import re
+                    matches = re.findall(rb"/Type\s*/Page[^s]", content)
+                    if matches:
+                        return max(1, len(matches))
+            except Exception:
+                pass
+            return 1
+
+    # 3. Tệp Word .docx: Đọc thẻ <Pages> trong docProps/app.xml (siêu nhanh)
+    if ext == ".docx":
+        try:
+            import zipfile
+            import xml.etree.ElementTree as ET
+            with zipfile.ZipFile(filepath, "r") as z:
+                if "docProps/app.xml" in z.namelist():
+                    app_xml = z.read("docProps/app.xml")
+                    root = ET.fromstring(app_xml)
+                    for elem in root.iter():
+                        if elem.tag.endswith("Pages") and elem.text and elem.text.isdigit():
+                            return max(1, int(elem.text))
+        except Exception:
+            pass
+
+    # 4. Tệp Excel .xlsx: Đọc số sheet từ openpyxl hoặc docProps
+    if ext in [".xlsx", ".xls"]:
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(filepath, read_only=True)
+            num_sheets = len(wb.sheetnames)
+            wb.close()
+            return max(1, num_sheets)
+        except Exception:
+            pass
+
+    # 5. Tệp văn bản thuần: Ước lượng 50 dòng / trang
+    if ext in [".txt", ".log", ".csv", ".md", ".json", ".xml", ".ini", ".py"]:
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                lines = sum(1 for _ in f)
+            return max(1, (lines + 49) // 50)
+        except Exception:
+            pass
+
+    return 1
+
+
 @dataclass
 class PrintItem:
     filepath: str
@@ -28,6 +97,7 @@ class PrintItem:
     file_size_bytes: int = 0
     file_size_str: str = ""
     file_type: str = ""
+    page_count: int = 1
     status: PrintStatus = PrintStatus.PENDING
     status_detail: str = ""
     copies: int = 1
@@ -44,6 +114,7 @@ class PrintItem:
             try:
                 self.file_size_bytes = os.path.getsize(self.filepath)
                 self.file_size_str = self._format_size(self.file_size_bytes)
+                self.page_count = detect_file_page_count(self.filepath)
             except Exception:
                 pass
 
@@ -61,6 +132,12 @@ class PrintItem:
                 self.file_size_str = "0 B"
         elif not self.file_size_str:
             self.file_size_str = self._format_size(self.file_size_bytes)
+
+        if self.page_count <= 1 and os.path.exists(self.filepath):
+            try:
+                self.page_count = detect_file_page_count(self.filepath)
+            except Exception:
+                self.page_count = 1
 
     @staticmethod
     def _format_size(size_bytes: int) -> str:
@@ -128,6 +205,9 @@ class PrintItem:
 
     def get_copies_display(self) -> str:
         return f"{self.copies} bản"
+
+    def get_pages_display(self) -> str:
+        return f"{self.page_count} trang"
 
     def get_display_name(self, max_len: int = 40) -> str:
         """Trả về tên file rút gọn nếu quá dài."""

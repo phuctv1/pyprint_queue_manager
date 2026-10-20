@@ -255,6 +255,23 @@ class PrintQueueManager:
             completed_count = sum(1 for item in self._items if item.status == PrintStatus.COMPLETED)
             failed_count = sum(1 for item in self._items if item.status == PrintStatus.FAILED)
             total_copies = sum(item.copies for item in self._items)
+            total_pages = sum(item.page_count for item in self._items)
+            total_printed_pages = sum(item.page_count * item.copies for item in self._items)
+
+            # Ước tính số tờ giấy A4 dựa trên cấu hình In 1 mặt / 2 mặt (Duplex)
+            estimated_paper_sheets = 0
+            for item in self._items:
+                is_duplex = False
+                if item.print_settings:
+                    dup = str(item.print_settings.get("duplex", "")).lower()
+                    if ("both sides" in dup or "2 mặt" in dup or "long edge" in dup or "short edge" in dup) and "one sided" not in dup:
+                        is_duplex = True
+                if is_duplex:
+                    sheets_per_copy = (item.page_count + 1) // 2
+                else:
+                    sheets_per_copy = item.page_count
+                estimated_paper_sheets += sheets_per_copy * item.copies
+
             high_priority_count = sum(
                 1 for item in self._items
                 if item.priority in (Priority.HIGH, Priority.URGENT)
@@ -265,6 +282,9 @@ class PrintQueueManager:
                 "total": total_count,
                 "total_size_bytes": total_size_bytes,
                 "total_size_str": PrintItem._format_size(total_size_bytes),
+                "total_pages": total_pages,
+                "total_printed_pages": total_printed_pages,
+                "estimated_paper_sheets": estimated_paper_sheets,
                 "pending": pending_count,
                 "printing": printing_count,
                 "completed": completed_count,

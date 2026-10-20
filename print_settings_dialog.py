@@ -129,6 +129,7 @@ class OfficeSettingDropdown(ctk.CTkFrame):
         self.options = options
         self.current_index = initial_index if 0 <= initial_index < len(options) else 0
         self.on_change = on_change
+        self.icon_name = icon_name
         self._icon_image = create_setting_icon(icon_name, (26, 26))
 
         self.grid_columnconfigure(1, weight=1)
@@ -191,6 +192,15 @@ class OfficeSettingDropdown(ctk.CTkFrame):
             w.bind("<Enter>", self._on_enter)
             w.bind("<Leave>", self._on_leave)
 
+    def update_icon(self, icon_name: str):
+        """Cập nhật icon vector linh hoạt theo trạng thái được chọn."""
+        try:
+            self.icon_name = icon_name
+            self._icon_image = create_setting_icon(icon_name, (26, 26))
+            self.lbl_icon.configure(image=self._icon_image)
+        except Exception:
+            pass
+
     def _on_enter(self, e):
         self.configure(border_color="#71717a", fg_color="#27272a")
         for w in [self.lbl_icon, self.text_frame, self.lbl_title, self.lbl_sub, self.lbl_arrow]:
@@ -232,11 +242,52 @@ class OfficeSettingDropdown(ctk.CTkFrame):
         return self.options[self.current_index]
 
 
+def find_option_index(options: List[Tuple[str, str]], saved_val, default: int = 0) -> int:
+    """
+    Tìm vị trí index trong danh sách options = [(Title, Subtitle), ...] khớp với giá trị đã lưu saved_val.
+    saved_val có thể là tuple/list (Title, Subtitle) hoặc string Title.
+    """
+    if not saved_val:
+        return default
+
+    # Trường hợp saved_val là tuple hoặc list: (Title, Subtitle)
+    if isinstance(saved_val, (tuple, list)) and len(saved_val) > 0:
+        target_title = str(saved_val[0]).strip().lower()
+        target_sub = str(saved_val[1]).strip().lower() if len(saved_val) > 1 else ""
+
+        # Ưu tiên khớp chính xác cả Title và Subtitle
+        if target_sub:
+            for idx, (title, sub) in enumerate(options):
+                if title.strip().lower() == target_title and sub.strip().lower() == target_sub:
+                    return idx
+
+        # Khớp theo Title
+        for idx, (title, _) in enumerate(options):
+            if title.strip().lower() == target_title:
+                return idx
+
+    # Trường hợp saved_val là string
+    elif isinstance(saved_val, str):
+        target = saved_val.strip().lower()
+        for idx, (title, _) in enumerate(options):
+            if title.strip().lower() == target:
+                return idx
+        for idx, (title, sub) in enumerate(options):
+            if target in title.strip().lower() or (sub and target in sub.strip().lower()):
+                return idx
+
+    return default
+
+
 class OfficePrintSettingsDialog(ctk.CTkToplevel):
     """
     Cửa sổ Print Settings:
     - Nếu file là DOC/DOCX: Giao diện chuẩn hình ảnh 2.
     - Nếu file là XLS/XLSX: Giao diện chuẩn hình ảnh 3.
+    Đảm bảo:
+    1. Chỉ mở duy nhất 1 hộp thoại (modal window grab_set).
+    2. Nút Lưu & Áp Dụng không thể ấn nhiều lần (chống spam).
+    3. Tải và áp dụng chính xác toàn bộ cài đặt đã lưu của file (one-sided/duplex, orientation, v.v.).
     """
     def __init__(
         self,
@@ -250,25 +301,47 @@ class OfficePrintSettingsDialog(ctk.CTkToplevel):
         self.item = item
         self.all_items = all_items or []
         self.on_apply = on_apply
+        self._is_saving = False
+        self._page_setup_win = None
+
+        # Nạp cài đặt đã lưu trước đó nếu có
+        self.current_settings = dict(self.item.print_settings) if (self.item and hasattr(self.item, "print_settings") and self.item.print_settings) else {}
 
         # Xác định chế độ DOC/DOCX hay XLS/XLSX
-        self.mode = "docx"  # "docx" hoặc "xlsx"
-        if self.item:
+        if "mode" in self.current_settings:
+            self.mode = self.current_settings["mode"]
+        elif self.item:
             ext = os.path.splitext(self.item.filepath)[1].lower()
-            if ext in [".xls", ".xlsx"]:
-                self.mode = "xlsx"
+            self.mode = "xlsx" if ext in [".xls", ".xlsx"] else "docx"
+        else:
+            self.mode = "docx"
 
         self.title("Print Settings" if not item else f"Print Settings - {item.filename}")
-        self.geometry("340x620")
+        self.geometry("340x630")
         self.resizable(False, False)
         self.configure(fg_color="#0f0f11")
         self.attributes("-topmost", True)
 
-        # Tập hợp các widget cài đặt để lấy giá trị khi Save
-        self.widgets_map = {}
+        # Chặn mở nhiều cửa sổ bằng modal dialog
+        self.transient(parent)
+        try:
+            self.grab_set()
+        except Exception:
+            pass
+
+        self.bind("<Escape>", lambda e: self.destroy())
 
         self._build_ui()
         self.center_window()
+
+    def destroy(self):
+        try:
+            self.grab_release()
+        except Exception:
+            pass
+        if hasattr(self.parent, "_print_settings_dialog") and self.parent._print_settings_dialog is self:
+            self.parent._print_settings_dialog = None
+        super().destroy()
 
     def center_window(self):
         self.update_idletasks()
@@ -295,8 +368,8 @@ class OfficePrintSettingsDialog(ctk.CTkToplevel):
         )
         lbl_settings.pack(side="left")
 
-        # Nút chuyển đổi định dạng (nếu người dùng muốn xem dạng Word hoặc Excel)
-        mode_btn = tk.Label(
+        # Nút chuyển đổi định dạng
+        self.mode_btn = tk.Label(
             header_box,
             text=f"[{'Word Mode' if self.mode == 'docx' else 'Excel Mode'}]",
             font=("Segoe UI", 9, "italic"),
@@ -304,10 +377,10 @@ class OfficePrintSettingsDialog(ctk.CTkToplevel):
             bg="#0f0f11",
             cursor="hand2",
         )
-        mode_btn.pack(side="right")
-        mode_btn.bind("<Button-1>", lambda e: self._toggle_mode())
+        self.mode_btn.pack(side="right")
+        self.mode_btn.bind("<Button-1>", lambda e: self._toggle_mode())
 
-        # Vùng chứa các mục settings cuộn
+        # Vùng chứa các mục settings
         self.body_frame = ctk.CTkFrame(container, fg_color="transparent")
         self.body_frame.pack(fill="both", expand=True)
 
@@ -318,7 +391,7 @@ class OfficePrintSettingsDialog(ctk.CTkToplevel):
 
         # Link "Page Setup" ở góc phải
         link_box = ctk.CTkFrame(container, fg_color="transparent")
-        link_box.pack(fill="x", pady=(8, 12))
+        link_box.pack(fill="x", pady=(8, 8))
 
         lbl_page_setup = tk.Label(
             link_box,
@@ -331,11 +404,27 @@ class OfficePrintSettingsDialog(ctk.CTkToplevel):
         lbl_page_setup.pack(side="right")
         lbl_page_setup.bind("<Button-1>", lambda e: self._open_page_setup_modal())
 
+        # Checkbox áp dụng cho tất cả file cùng định dạng
+        self.var_apply_all = tk.BooleanVar(value=False)
+        ext_desc = "Word (.docx)" if self.mode == "docx" else "Excel (.xlsx)"
+        self.chk_apply_all = ctk.CTkCheckBox(
+            container,
+            text=f"Áp dụng cho tất cả file {ext_desc}",
+            variable=self.var_apply_all,
+            font=ctk.CTkFont(family="Segoe UI", size=11),
+            checkbox_width=18,
+            checkbox_height=18,
+            border_width=1,
+            fg_color="#2563eb",
+            hover_color="#1d4ed8",
+        )
+        self.chk_apply_all.pack(fill="x", pady=(2, 10))
+
         # Hàng nút Áp dụng và Đóng
         btn_bar = ctk.CTkFrame(container, fg_color="transparent")
         btn_bar.pack(fill="x")
 
-        btn_apply = ctk.CTkButton(
+        self.btn_apply = ctk.CTkButton(
             btn_bar,
             text="Lưu & Áp Dụng",
             height=32,
@@ -344,9 +433,9 @@ class OfficePrintSettingsDialog(ctk.CTkToplevel):
             fg_color="#2563eb",
             hover_color="#1d4ed8",
         )
-        btn_apply.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self.btn_apply.pack(side="left", fill="x", expand=True, padx=(0, 6))
 
-        btn_close = ctk.CTkButton(
+        self.btn_close = ctk.CTkButton(
             btn_bar,
             text="Đóng",
             height=32,
@@ -356,10 +445,49 @@ class OfficePrintSettingsDialog(ctk.CTkToplevel):
             fg_color="#3f3f46",
             hover_color="#52525b",
         )
-        btn_close.pack(side="right")
+        self.btn_close.pack(side="right")
+
+    def _collect_current_settings(self):
+        """Thu thập các giá trị đang hiển thị trên giao diện vào current_settings."""
+        self.current_settings["mode"] = self.mode
+        if hasattr(self, "dd_print_pages"):
+            self.current_settings["print_pages"] = self.dd_print_pages.get_selected()
+        if hasattr(self, "dd_duplex"):
+            self.current_settings["duplex"] = self.dd_duplex.get_selected()
+        if hasattr(self, "dd_collated"):
+            self.current_settings["collated"] = self.dd_collated.get_selected()
+        if hasattr(self, "dd_orient"):
+            self.current_settings["orientation"] = self.dd_orient.get_selected()
+        if hasattr(self, "dd_size"):
+            self.current_settings["paper_size"] = self.dd_size.get_selected()
+        if hasattr(self, "dd_margins"):
+            self.current_settings["margins"] = self.dd_margins.get_selected()
+
+        if self.mode == "docx":
+            if hasattr(self, "entry_pages"):
+                self.current_settings["pages_range"] = self.entry_pages.get().strip()
+            if hasattr(self, "dd_pps"):
+                self.current_settings["page_per_sheet"] = self.dd_pps.get_selected()
+        else:
+            if hasattr(self, "spin_from"):
+                self.current_settings["page_from"] = self.spin_from.get()
+            if hasattr(self, "spin_to"):
+                self.current_settings["page_to"] = self.spin_to.get()
+            if hasattr(self, "dd_scaling"):
+                self.current_settings["scaling"] = self.dd_scaling.get_selected()
 
     def _toggle_mode(self):
+        self._collect_current_settings()
         self.mode = "xlsx" if self.mode == "docx" else "docx"
+        self.current_settings["mode"] = self.mode
+
+        if hasattr(self, "mode_btn"):
+            self.mode_btn.configure(text=f"[{'Word Mode' if self.mode == 'docx' else 'Excel Mode'}]")
+
+        if hasattr(self, "chk_apply_all"):
+            ext_desc = "Word (.docx)" if self.mode == "docx" else "Excel (.xlsx)"
+            self.chk_apply_all.configure(text=f"Áp dụng cho tất cả file {ext_desc}")
+
         for w in self.body_frame.winfo_children():
             w.destroy()
         if self.mode == "docx":
@@ -368,7 +496,9 @@ class OfficePrintSettingsDialog(ctk.CTkToplevel):
             self._build_xlsx_settings()
 
     def _build_docx_settings(self):
-        """Xây dựng giao diện cài đặt file DOC/DOCX theo ảnh thứ 2."""
+        """Xây dựng giao diện cài đặt file DOC/DOCX theo ảnh mẫu Microsoft Office Word."""
+        saved = self.current_settings
+
         # 1. Print All Pages
         opt_pages = [
             ("Print All Pages", "The whole thing"),
@@ -376,7 +506,8 @@ class OfficePrintSettingsDialog(ctk.CTkToplevel):
             ("Print Current Page", "Only this page"),
             ("Custom Print", "Enter specific pages"),
         ]
-        self.dd_print_pages = OfficeSettingDropdown(self.body_frame, "doc", opt_pages, 0)
+        idx_pages = find_option_index(opt_pages, saved.get("print_pages"), 0)
+        self.dd_print_pages = OfficeSettingDropdown(self.body_frame, "doc", opt_pages, idx_pages)
         self.dd_print_pages.pack(fill="x", pady=3)
 
         # 2. Pages Input: Pages: [        ] (i)
@@ -398,21 +529,32 @@ class OfficePrintSettingsDialog(ctk.CTkToplevel):
             placeholder_text="",
         )
         self.entry_pages.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        if saved.get("pages_range"):
+            self.entry_pages.insert(0, str(saved.get("pages_range")))
 
         lbl_info = tk.Label(pages_input_frame, text="ⓘ", font=("Segoe UI", 11, "bold"), fg="#38bdf8", bg="#0f0f11", cursor="hand2")
         lbl_info.pack(side="right", padx=(2, 4))
         lbl_info.bind("<Button-1>", lambda e: messagebox.showinfo(
             "Hướng dẫn nhập trang in",
-            "Nhập số trang hoặc khoảng trang cần in cách nhau bằng dấu phẩy.\n\nVí dụ: 1-5, 8, 11-13"
+            "Nhập số trang hoặc khoảng trang cần in cách nhau bằng dấu phẩy.\n\nVí dụ: 1-5, 8, 11-13",
+            parent=self,
         ))
 
-        # 3. Print on Both Sides
+        # 3. Print on Both Sides / One Sided
         opt_duplex = [
             ("Print on Both Sides", "Flip pages on long edge"),
             ("Print on Both Sides", "Flip pages on short edge"),
             ("Print One Sided", "Only print on one side of the page"),
         ]
-        self.dd_duplex = OfficeSettingDropdown(self.body_frame, "duplex", opt_duplex, 0)
+        idx_duplex = find_option_index(opt_duplex, saved.get("duplex"), 0)
+        duplex_icon = "simplex" if idx_duplex == 2 else "duplex"
+        self.dd_duplex = OfficeSettingDropdown(
+            self.body_frame,
+            duplex_icon,
+            opt_duplex,
+            idx_duplex,
+            on_change=lambda title, sub: self.dd_duplex.update_icon("simplex" if "one sided" in title.lower() else "duplex"),
+        )
         self.dd_duplex.pack(fill="x", pady=3)
 
         # 4. Collated
@@ -420,7 +562,8 @@ class OfficePrintSettingsDialog(ctk.CTkToplevel):
             ("Collated", "1,2,3  1,2,3  1,2,3"),
             ("Uncollated", "1,1,1  2,2,2  3,3,3"),
         ]
-        self.dd_collated = OfficeSettingDropdown(self.body_frame, "collated", opt_collated, 0)
+        idx_collated = find_option_index(opt_collated, saved.get("collated"), 0)
+        self.dd_collated = OfficeSettingDropdown(self.body_frame, "collated", opt_collated, idx_collated)
         self.dd_collated.pack(fill="x", pady=3)
 
         # 5. Orientation
@@ -428,7 +571,15 @@ class OfficePrintSettingsDialog(ctk.CTkToplevel):
             ("Portrait Orientation", ""),
             ("Landscape Orientation", ""),
         ]
-        self.dd_orient = OfficeSettingDropdown(self.body_frame, "portrait", opt_orient, 0)
+        idx_orient = find_option_index(opt_orient, saved.get("orientation"), 0)
+        orient_icon = "landscape" if idx_orient == 1 else "portrait"
+        self.dd_orient = OfficeSettingDropdown(
+            self.body_frame,
+            orient_icon,
+            opt_orient,
+            idx_orient,
+            on_change=lambda title, sub: self.dd_orient.update_icon("landscape" if "landscape" in title.lower() else "portrait"),
+        )
         self.dd_orient.pack(fill="x", pady=3)
 
         # 6. Paper Size
@@ -438,7 +589,8 @@ class OfficePrintSettingsDialog(ctk.CTkToplevel):
             ("A3", "297 x 420 mm"),
             ("Legal", '8.5" x 14"'),
         ]
-        self.dd_size = OfficeSettingDropdown(self.body_frame, "paper_size", opt_size, 0)
+        idx_size = find_option_index(opt_size, saved.get("paper_size"), 0)
+        self.dd_size = OfficeSettingDropdown(self.body_frame, "paper_size", opt_size, idx_size)
         self.dd_size.pack(fill="x", pady=3)
 
         # 7. Margins
@@ -448,7 +600,9 @@ class OfficePrintSettingsDialog(ctk.CTkToplevel):
             ("Moderate Margins", 'Top: 1" Bottom: 1" Left: 0.75" Right: 0.75"'),
             ("Wide Margins", 'Top: 1" Bottom: 1" Left: 2" Right: 2"'),
         ]
-        self.dd_margins = OfficeSettingDropdown(self.body_frame, "margins_normal", opt_margins, 0)
+        idx_margins = find_option_index(opt_margins, saved.get("margins"), 0)
+        margins_icon = "margins_narrow" if idx_margins == 1 else "margins_normal"
+        self.dd_margins = OfficeSettingDropdown(self.body_frame, margins_icon, opt_margins, idx_margins)
         self.dd_margins.pack(fill="x", pady=3)
 
         # 8. Page Per Sheet
@@ -458,18 +612,22 @@ class OfficePrintSettingsDialog(ctk.CTkToplevel):
             ("4 Pages Per Sheet", ""),
             ("6 Pages Per Sheet", ""),
         ]
-        self.dd_pps = OfficeSettingDropdown(self.body_frame, "page_per_sheet", opt_pps, 0)
+        idx_pps = find_option_index(opt_pps, saved.get("page_per_sheet"), 0)
+        self.dd_pps = OfficeSettingDropdown(self.body_frame, "page_per_sheet", opt_pps, idx_pps)
         self.dd_pps.pack(fill="x", pady=3)
 
     def _build_xlsx_settings(self):
-        """Xây dựng giao diện cài đặt file XLS/XLSX theo ảnh thứ 3."""
+        """Xây dựng giao diện cài đặt file XLS/XLSX theo ảnh mẫu Microsoft Office Excel."""
+        saved = self.current_settings
+
         # 1. Print Active Sheets
         opt_sheets = [
             ("Print Active Sheets", "Only print the active sheets"),
             ("Print Entire Workbook", "Print the entire workbook"),
             ("Print Selection", "Only print the current selection"),
         ]
-        self.dd_print_pages = OfficeSettingDropdown(self.body_frame, "sheets_grid", opt_sheets, 0)
+        idx_sheets = find_option_index(opt_sheets, saved.get("print_pages"), 0)
+        self.dd_print_pages = OfficeSettingDropdown(self.body_frame, "sheets_grid", opt_sheets, idx_sheets)
         self.dd_print_pages.pack(fill="x", pady=3)
 
         # 2. Pages: [  ] to [  ]
@@ -481,23 +639,31 @@ class OfficePrintSettingsDialog(ctk.CTkToplevel):
         lbl_pages.pack(side="left", padx=(4, 6))
 
         self.spin_from = ttk.Spinbox(pages_input_frame, from_=1, to=999, width=5)
-        self.spin_from.set("1")
+        self.spin_from.set(str(saved.get("page_from", "1")))
         self.spin_from.pack(side="left", padx=(0, 4))
 
         lbl_to = tk.Label(pages_input_frame, text="to", font=("Segoe UI", 10), fg="#f4f4f5", bg="#0f0f11")
         lbl_to.pack(side="left", padx=(2, 4))
 
         self.spin_to = ttk.Spinbox(pages_input_frame, from_=1, to=999, width=5)
-        self.spin_to.set("1")
+        self.spin_to.set(str(saved.get("page_to", "1")))
         self.spin_to.pack(side="left", padx=(0, 4))
 
-        # 3. Print One Sided
+        # 3. Print One Sided / Both Sides
         opt_duplex = [
             ("Print One Sided", "Only print on one side of the page"),
             ("Print on Both Sides", "Flip pages on long edge"),
             ("Print on Both Sides", "Flip pages on short edge"),
         ]
-        self.dd_duplex = OfficeSettingDropdown(self.body_frame, "simplex", opt_duplex, 0)
+        idx_duplex = find_option_index(opt_duplex, saved.get("duplex"), 0)
+        duplex_icon = "simplex" if idx_duplex == 0 else "duplex"
+        self.dd_duplex = OfficeSettingDropdown(
+            self.body_frame,
+            duplex_icon,
+            opt_duplex,
+            idx_duplex,
+            on_change=lambda title, sub: self.dd_duplex.update_icon("simplex" if "one sided" in title.lower() else "duplex"),
+        )
         self.dd_duplex.pack(fill="x", pady=3)
 
         # 4. Collated
@@ -505,15 +671,24 @@ class OfficePrintSettingsDialog(ctk.CTkToplevel):
             ("Collated", "1,2,3  1,2,3  1,2,3"),
             ("Uncollated", "1,1,1  2,2,2  3,3,3"),
         ]
-        self.dd_collated = OfficeSettingDropdown(self.body_frame, "collated", opt_collated, 0)
+        idx_collated = find_option_index(opt_collated, saved.get("collated"), 0)
+        self.dd_collated = OfficeSettingDropdown(self.body_frame, "collated", opt_collated, idx_collated)
         self.dd_collated.pack(fill="x", pady=3)
 
-        # 5. Orientation (Landscape)
+        # 5. Orientation (Landscape default for Excel)
         opt_orient = [
             ("Landscape Orientation", ""),
             ("Portrait Orientation", ""),
         ]
-        self.dd_orient = OfficeSettingDropdown(self.body_frame, "landscape", opt_orient, 0)
+        idx_orient = find_option_index(opt_orient, saved.get("orientation"), 0)
+        orient_icon = "landscape" if idx_orient == 0 else "portrait"
+        self.dd_orient = OfficeSettingDropdown(
+            self.body_frame,
+            orient_icon,
+            opt_orient,
+            idx_orient,
+            on_change=lambda title, sub: self.dd_orient.update_icon("landscape" if "landscape" in title.lower() else "portrait"),
+        )
         self.dd_orient.pack(fill="x", pady=3)
 
         # 6. Paper Size
@@ -523,7 +698,8 @@ class OfficePrintSettingsDialog(ctk.CTkToplevel):
             ("A3", "297 x 420 mm"),
             ("Legal", '8.5" x 14"'),
         ]
-        self.dd_size = OfficeSettingDropdown(self.body_frame, "paper_size", opt_size, 0)
+        idx_size = find_option_index(opt_size, saved.get("paper_size"), 0)
+        self.dd_size = OfficeSettingDropdown(self.body_frame, "paper_size", opt_size, idx_size)
         self.dd_size.pack(fill="x", pady=3)
 
         # 7. Margins (Narrow Margins)
@@ -532,7 +708,9 @@ class OfficePrintSettingsDialog(ctk.CTkToplevel):
             ("Normal Margins", 'Top: 0.75" Bottom: 0.75" Left: 0.7" Right: 0.7"'),
             ("Wide Margins", 'Top: 1" Bottom: 1" Left: 1" Right: 1"'),
         ]
-        self.dd_margins = OfficeSettingDropdown(self.body_frame, "margins_narrow", opt_margins, 0)
+        idx_margins = find_option_index(opt_margins, saved.get("margins"), 0)
+        margins_icon = "margins_narrow" if idx_margins == 0 else "margins_normal"
+        self.dd_margins = OfficeSettingDropdown(self.body_frame, margins_icon, opt_margins, idx_margins)
         self.dd_margins.pack(fill="x", pady=3)
 
         # 8. Scaling (No Scaling)
@@ -542,16 +720,47 @@ class OfficePrintSettingsDialog(ctk.CTkToplevel):
             ("Fit All Columns on One Page", "Shrink the printout so that it is one page wide"),
             ("Fit All Rows on One Page", "Shrink the printout so that it is one page high"),
         ]
-        self.dd_scaling = OfficeSettingDropdown(self.body_frame, "no_scaling", opt_scaling, 0)
+        idx_scaling = find_option_index(opt_scaling, saved.get("scaling"), 0)
+        self.dd_scaling = OfficeSettingDropdown(self.body_frame, "no_scaling", opt_scaling, idx_scaling)
         self.dd_scaling.pack(fill="x", pady=3)
 
     def _open_page_setup_modal(self):
         """Mở hộp thoại thiết lập trang in chi tiết (Page Setup)."""
+        if hasattr(self, "_page_setup_win") and self._page_setup_win is not None:
+            try:
+                if self._page_setup_win.winfo_exists():
+                    self._page_setup_win.deiconify()
+                    self._page_setup_win.lift()
+                    self._page_setup_win.focus_force()
+                    return
+            except Exception:
+                self._page_setup_win = None
+
         setup_win = ctk.CTkToplevel(self)
+        self._page_setup_win = setup_win
         setup_win.title("Page Setup")
         setup_win.geometry("380x320")
         setup_win.resizable(False, False)
         setup_win.attributes("-topmost", True)
+        setup_win.transient(self)
+        try:
+            setup_win.grab_set()
+        except Exception:
+            pass
+
+        def _close_setup():
+            try:
+                setup_win.grab_release()
+            except Exception:
+                pass
+            setup_win.destroy()
+            self._page_setup_win = None
+            try:
+                self.grab_set()
+            except Exception:
+                pass
+
+        setup_win.protocol("WM_DELETE_WINDOW", _close_setup)
 
         pad_f = ctk.CTkFrame(setup_win, fg_color="transparent")
         pad_f.pack(fill="both", expand=True, padx=20, pady=16)
@@ -590,34 +799,39 @@ class OfficePrintSettingsDialog(ctk.CTkToplevel):
         btn_ok = ctk.CTkButton(
             pad_f,
             text="Đồng ý",
-            command=setup_win.destroy,
+            command=_close_setup,
             fg_color="#2563eb",
             hover_color="#1d4ed8",
         )
         btn_ok.pack(pady=(16, 0))
 
     def _on_apply_clicked(self):
-        """Lưu lại các thiết lập."""
-        settings = {
-            "mode": self.mode,
-            "print_pages": self.dd_print_pages.get_selected(),
-            "duplex": self.dd_duplex.get_selected(),
-            "collated": self.dd_collated.get_selected(),
-            "orientation": self.dd_orient.get_selected(),
-            "paper_size": self.dd_size.get_selected(),
-            "margins": self.dd_margins.get_selected(),
-        }
+        """Lưu lại các thiết lập và ngăn chặn bấm nhiều lần."""
+        if self._is_saving:
+            return
+        self._is_saving = True
 
-        if self.mode == "docx":
-            settings["pages_range"] = self.entry_pages.get().strip()
-            settings["page_per_sheet"] = self.dd_pps.get_selected()
-        else:
-            settings["page_from"] = self.spin_from.get()
-            settings["page_to"] = self.spin_to.get()
-            settings["scaling"] = self.dd_scaling.get_selected()
+        if hasattr(self, "btn_apply") and self.btn_apply.winfo_exists():
+            self.btn_apply.configure(state="disabled", text="Đang lưu...")
+
+        self._collect_current_settings()
+        settings = dict(self.current_settings)
+
+        apply_all = False
+        if hasattr(self, "var_apply_all"):
+            apply_all = bool(self.var_apply_all.get())
 
         if self.on_apply:
-            self.on_apply(settings, False)
+            try:
+                self.on_apply(settings, apply_all)
+            except Exception as ex:
+                print(f"Lỗi khi lưu print settings: {ex}")
 
-        messagebox.showinfo("Thành công", "Đã cập nhật cài đặt in ấn (Print Settings) cho tài liệu!")
+        parent = self.parent
         self.destroy()
+
+        msg = "Đã cập nhật cài đặt in ấn (Print Settings) cho tài liệu!"
+        if apply_all:
+            msg = "Đã áp dụng cài đặt in ấn cho tất cả tài liệu cùng loại!"
+        messagebox.showinfo("Thành công", msg, parent=parent)
+
